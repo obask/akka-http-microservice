@@ -13,9 +13,10 @@ import akka.stream.scaladsl.{Flow, Sink, Source}
 import com.typesafe.config.Config
 import com.typesafe.config.ConfigFactory
 import java.io.IOException
+import scala.collection.mutable
 import scala.concurrent.{ExecutionContextExecutor, Future}
 import scala.math._
-import spray.json.DefaultJsonProtocol
+import spray.json.{JsonParser, DefaultJsonProtocol}
 
 // TODO https://github.com/tastejs/todomvc/tree/gh-pages/examples/react-backbone
 
@@ -25,34 +26,14 @@ case class IpPairSummaryRequest(ip1: String, ip2: String)
 
 case class IpPairSummary(distance: Option[Double], ip1Info: IpInfo, ip2Info: IpInfo)
 
-object IpPairSummary {
-  def apply(ip1Info: IpInfo, ip2Info: IpInfo): IpPairSummary = IpPairSummary(calculateDistance(ip1Info, ip2Info), ip1Info, ip2Info)
-
-  private def calculateDistance(ip1Info: IpInfo, ip2Info: IpInfo): Option[Double] = {
-    (ip1Info.latitude, ip1Info.longitude, ip2Info.latitude, ip2Info.longitude) match {
-      case (Some(lat1), Some(lon1), Some(lat2), Some(lon2)) =>
-        // see http://www.movable-type.co.uk/scripts/latlong.html
-        val φ1 = toRadians(lat1)
-        val φ2 = toRadians(lat2)
-        val Δφ = toRadians(lat2 - lat1)
-        val Δλ = toRadians(lon2 - lon1)
-        val a = pow(sin(Δφ / 2), 2) + cos(φ1) * cos(φ2) * pow(sin(Δλ / 2), 2)
-        val c = 2 * atan2(sqrt(a), sqrt(1 - a))
-        Option(EarthRadius * c)
-      case _ => None
-    }
-  }
-
-  private val EarthRadius = 6371.0
-}
 
 case class JustInfo(ip: String, country: Option[String])
 
-case class JustRequest(ask: String)
+case class JustRequest(title: String, order: Int, completed: Boolean)
 
 trait Protocols extends DefaultJsonProtocol {
   implicit val justInfoFormat = jsonFormat2(JustInfo.apply)
-  implicit val justRequestFormat = jsonFormat1(JustRequest.apply)
+  implicit val justRequestFormat = jsonFormat3(JustRequest.apply)
 
   implicit val ipInfoFormat = jsonFormat5(IpInfo.apply)
   implicit val ipPairSummaryRequestFormat = jsonFormat2(IpPairSummaryRequest.apply)
@@ -67,72 +48,46 @@ trait Service extends Protocols {
   def config: Config
   val logger: LoggingAdapter
 
-  lazy val telizeConnectionFlow: Flow[HttpRequest, HttpResponse, Any] =
-    Http().outgoingConnection(config.getString("services.telizeHost"), config.getInt("services.telizePort"))
+//  lazy val projectPath = config.getString("project.path")
 
-  def telizeRequest(request: HttpRequest): Future[HttpResponse] = Source.single(request).via(telizeConnectionFlow).runWith(Sink.head)
+  val data = mutable.Map(
+     "zz1" -> JustRequest("zz1", 1, completed = false)
+    ,"zz2" -> JustRequest("zz2", 2, completed = false)
+    ,"zz3" -> JustRequest("zz3", 3, completed = false)
+    ,"zz4" -> JustRequest("zz4", 4, completed = false)
+    ,"zz5" -> JustRequest("zz5", 5, completed = false)
+  )
 
-  def fetchIpInfo(ip: String): Future[Either[String, IpInfo]] = {
-    telizeRequest(RequestBuilding.Get(s"/geoip/$ip")).flatMap { response =>
-      response.status match {
-        case OK => Unmarshal(response.entity).to[IpInfo].map(Right(_))
-        case BadRequest => Future.successful(Left(s"$ip: incorrect IP format"))
-        case _ => Unmarshal(response.entity).to[String].flatMap { entity =>
-          val error = s"Telize request failed with status code ${response.status} and entity $entity"
-          logger.error(error)
-          Future.failed(new IOException(error))
-        }
-      }
-    }
-  }
-
-  lazy val projectPath = config.getString("project.path")
 
   lazy val routes = {
     logRequestResult("akka-http-microservice") {
+      path("app") {
+        getFromResource("app/index.html")
+      } ~
       pathPrefix("js") {
-        getFromDirectory(projectPath + "src/main/js/")
-
+        getFromResourceDirectory("app/js")
       } ~
       pathPrefix("node_modules") {
-        getFromDirectory(projectPath + "node_modules/")
-
+        getFromResourceDirectory("app/node_modules")
       } ~
-      path("problems") {
-        getFromResource("index.html")
-
-      } ~
-      path("problems" / Rest) { ololo =>
-        println(s"DEBUG: $ololo")
-        getFromFile(projectPath + "index.html")
-      } ~
-      pathPrefix("home") {
-        (post & entity(as[JustRequest])) { ipPairSummaryRequest =>
+      pathPrefix("todos") {
+        get {
           complete {
-            JustInfo("dsadas", Some("dsadsa"))
-          }
-        }
-      } ~
-      pathPrefix("ip") {
-        (get & path(Segment)) { ip =>
-          complete {
-            fetchIpInfo(ip).map[ToResponseMarshallable] {
-              case Right(ipInfo) => ipInfo
-              case Left(errorMessage) => BadRequest -> errorMessage
-            }
+//            JsonParser(
+//              """[{"title":"fdsafdsf1","order":1, "completed":false}
+//                |,{"title":"fdsafdsf2","order":2, "completed":false}
+//                |]""".stripMargin)
+            data.values
           }
         } ~
-        (post & entity(as[IpPairSummaryRequest])) { ipPairSummaryRequest =>
+          (post & entity(as[JustRequest])) { x =>
           complete {
-            val ip1InfoFuture = fetchIpInfo(ipPairSummaryRequest.ip1)
-            val ip2InfoFuture = fetchIpInfo(ipPairSummaryRequest.ip2)
-            ip1InfoFuture.zip(ip2InfoFuture).map[ToResponseMarshallable] {
-              case (Right(info1), Right(info2)) => IpPairSummary(info1, info2)
-              case (Left(errorMessage), _) => BadRequest -> errorMessage
-              case (_, Left(errorMessage)) => BadRequest -> errorMessage
-            }
+            logger.warning("DEBUG = " + x)
+            data(x.title) = x
+            JsonParser("""{"success": true}""".stripMargin)
           }
         }
+
       }
     }
   }
